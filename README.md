@@ -89,42 +89,42 @@ You can check out the specific changes I've made [here](https://github.com/eric-
 * On the Python client side (`groupbyclass.py`), I added a new `min_mean_max` reduction type that sends the existing `segmentedReduction` command with `op="min_mean_max"`. The server replies with three symbol names joined by `+`, which I parse back into three separate pdarrays (mins, means, maxs).
 
 ```py
-    def min_mean_max(self, values: pdarray, skipna: bool = True) -> Tuple[groupable, pdarray, pdarray, pdarray]:
-        from arkouda.core.client import generic_msg
+def min_mean_max(self, values: pdarray, skipna: bool = True) -> Tuple[groupable, pdarray, pdarray, pdarray]:
+    from arkouda.core.client import generic_msg
 
-        if values.dtype == bool:
-            raise TypeError("min_mean_max is only supported for pdarrays of dtype float64, uint64, and int64")
+    if values.dtype == bool:
+        raise TypeError("min_mean_max is only supported for pdarrays of dtype float64, uint64, and int64")
 
-        if cast(pdarray, values).size != self.length:
-            raise ValueError("Attempt to group array using key array of different length")
+    if cast(pdarray, values).size != self.length:
+        raise ValueError("Attempt to group array using key array of different length")
 
-        if self.assume_sorted:
-            permuted_values = cast(pdarray, values)
-        else:
-            permuted_values = cast(pdarray, values)[cast(pdarray, self.permutation)]
+    if self.assume_sorted:
+        permuted_values = cast(pdarray, values)
+    else:
+        permuted_values = cast(pdarray, values)[cast(pdarray, self.permutation)]
 
-        rep_msg = generic_msg(
-            cmd="segmentedReduction",
-            args={
-                "values": permuted_values,
-                "segments": self.segments,
-                "op": "min_mean_max",
-                "skip_nan": skipna,
-                "ddof": 1,
-            },
-        )
-        self.logger.debug(rep_msg)
+    rep_msg = generic_msg(
+        cmd="segmentedReduction",
+        args={
+            "values": permuted_values,
+            "segments": self.segments,
+            "op": "min_mean_max",
+            "skip_nan": skipna,
+            "ddof": 1,
+        },
+    )
+    self.logger.debug(rep_msg)
 
-        # Parse the response: should be "min_name+mean_name+max_name"
-        parts = cast(str, rep_msg).split("+")
-        if len(parts) != 3:
-            raise RuntimeError(f"Unexpected response from min_mean_max reduction: {rep_msg}")
+    # Parse the response: should be "min_name+mean_name+max_name"
+    parts = cast(str, rep_msg).split("+")
+    if len(parts) != 3:
+        raise RuntimeError(f"Unexpected response from min_mean_max reduction: {rep_msg}")
 
-        mins = create_pdarray(cast(str, parts[0]))
-        means = create_pdarray(cast(str, parts[1]))
-        maxs = create_pdarray(cast(str, parts[2]))
+    mins = create_pdarray(cast(str, parts[0]))
+    means = create_pdarray(cast(str, parts[1]))
+    maxs = create_pdarray(cast(str, parts[2]))
 
-        return self.unique_keys, mins, means, maxs
+    return self.unique_keys, mins, means, maxs
 ```
 
 * The heavy lifting happens in Chapel (`ReductionMsg.chpl`) in a new `segMinMeanMax` proc. Instead of three reductions, it does one segmented parallel scan over the values.
@@ -289,6 +289,7 @@ Though Chapel is a fairly newer language, I found using AI programming tools (Gi
 Asking Copilot the difference between `accumulate` and `accumulateOntoState`, as well as the difference between `combineStats` and `combine`.
 
 ![GitHub Copilot example prompt 1](images/copilot-1.png)
+
 Copilot leaving redundant legacy code.
 
 ### Calling the Grouped `min_mean_max()` Function from Arkouda
