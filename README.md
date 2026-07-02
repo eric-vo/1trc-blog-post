@@ -1,24 +1,26 @@
 # 1 Billion/Trillion Row Challenge using Arkouda
 
-How performant are different programming languages and libraries with data processing? The [1 billion row challenge](https://1brc.dev/) has become a popularized, fun way to test this. The task itself is simple: Calculate the min, mean, and max of 1 billion measurements, grouped by station type. The [1 trillion row challenge](https://github.com/coiled/1trc) takes this a step further, extending the challenge to 1 trillion rows of data.
+How performant are different programming languages and libraries with data processing? The [1 billion row challenge](https://1brc.dev/) has become a popularized, fun way to test this. The task itself is simple: Calculate the min, mean, and max of 1 billion measurements, grouped by station type. We've talked about the 1 billion row challenge on this blog before (see [Chapel and the 1 Billion Row Challenge](https://chapel-lang.org/blog/posts/1brc/)). The [1 trillion row challenge](https://github.com/coiled/1trc) takes this a step further, extending the challenge to 1 trillion rows of data.
 
 At this scale, parallel and/or distributed computing is almost certainly needed for reasonable compute times. With Chapel being a language specifically designed for parallel computing and [Arkouda](https://github.com/Bears-R-Us/arkouda) acting as a bridge between Python and parallelized Chapel code, I wanted to test how Arkouda fares against more traditional parallelized Python approaches, such as using Dask.
 
 With that, let's start setting up Arkouda!
 
 ## Installing Anaconda, Arkouda, and Chapel
-Installation was mostly straightforward (following the [documentation](https://bears-r-us.github.io/arkouda/setup/BUILD.html)), aside from a few issues:
+Installation was mostly straightforward (following the [documentation](https://bears-r-us.github.io/arkouda/setup/MAC_INSTALL.html)), aside from a few issues:
 * Installing Anaconda via Homebrew doesn't automatically give access to the `conda` command! Turns out I needed to add Anaconda to PATH manually.
-* I first tried to install Chapel via Homebrew, but interestingly, that didn't come with a `util/` directory to set environment variables! So I ended up building Chapel from source.
+* I first tried installed Chapel via Homebrew, but interestingly, the installed Chapel at `/opt/homebrew/opt/chapel/` didn't include a Makefile (which gave me preemptive concerns about running `(cd $CHPL_HOME && make chapel-py-venv)` to install `chapel-py` later on), so I opted to build Chapel from source.
 
 ## Building the Arkouda Server
-Following the steps outlined in the [documentation](https://bears-r-us.github.io/arkouda/setup/BUILD.html), I eventually ran into one test failing upon building the server:
+Building the server itself was straightforward: following the steps outlined in the [documentation](https://bears-r-us.github.io/arkouda/setup/BUILD.html) and running `make`, I had a server ready to run with `./arkouda_server`!
+
+To validate the build, I then ran the Python test suite with `make test`, where I ran into one failing test:
 
 ![test_export_hdf fail](<images/test_export_hdf-fail.png>)
 
 I describe the error in detail in [this GitHub issue](https://github.com/Bears-R-Us/arkouda/issues/5494). Essentially, a test named `test_export_hdf` fails due to mismatched columns, and this is caused by a higher-than-supported `hdf5` version `2.10.0`. I ended up resolving this by changing Arkouda's `hdf5>=1.12.2` dependency to `hdf5==1.14.6`.
 
-Aside from that, smooth sailing for now. Now after running `make`, we've got a server ready to run with `./arkouda_server`!
+That said, this test failure didn't stricly block me from moving forward: I could've likely set it aside and used the server anyway since I wasn't planning on using `hdf5`.
 
 ## Arkouda Warm-Up: Ungrouped Min, Mean, and Max
 Now that I've got the Arkouda server up and running, it's time to test it out! I started with 1,000 rows of data spread across 2 Parquet files, and I used Arkouda to simply calculate the min, mean, and max of them. No grouping by stations yet, just to get a feel of what we're working with.
@@ -86,7 +88,9 @@ This works great, but what if we wanted to calculate the min, mean, and max in o
 ## Adding a Grouped `min_mean_max()` via Segmented Reduction
 You can check out the specific changes I've made [here](https://github.com/eric-vo/arkouda/commits/grouped-stats/). Here are the main highlights:
 * My new `GroupBy.min_mean_max(values, skipna=True)` returns the unique keys plus a min, mean, and max per group, all computed in a single server-side pass.
-* On the Python client side (`groupbyclass.py`), I added a new `min_mean_max` reduction type that sends the existing `segmentedReduction` command with `op="min_mean_max"`. The server replies with three symbol names joined by `+`, which I parse back into three separate pdarrays (mins, means, maxs).
+* On the Python client side (`groupbyclass.py`), I added a new `min_mean_max` reduction type that sends the existing `segmentedReduction` command with `op="min_mean_max"`. The server replies with three symbol names joined by `+` (mirroring how existing Arkouda code returns multiple values), which I parse back into three separate pdarrays (mins, means, maxs).
+
+> **What is `segmentedReduction`?** Arkouda's grouped aggregations are all backed by a single server command, `segmentedReduction` (handled by `segmentedReductionMsg` in `ReductionMsg.chpl`). It receives the group's `values` array, a `segments` array of offsets that marks where each group begins (group `i` spans `values[segments[i]]` through `values[segments[i+1] - 1]`, with the last segment running to the end), and an `op` string. A `select` on `op` then dispatches to a per-segment routine—`segSum`, `segMean`, `segMin`, `segMax`, and so on—each of which reduces every contiguous segment independently in a single parallel, distributed pass and returns one result per group. My `min_mean_max` fits into this as a new `op` backed by `segMinMeanMax`, reusing the same command to compute three statistics at once.
 
 ```py
 def min_mean_max(self, values: pdarray, skipna: bool = True) -> Tuple[groupable, pdarray, pdarray, pdarray]:
@@ -282,7 +286,7 @@ class ResettingMinMeanMaxScanOp: ReduceScanOp {
 ```
 
 ### Using GitHub Copilot with Chapel
-Though Chapel is a fairly newer language, I found using AI programming tools (GitHub Copilot in this case) with Chapel similar to using them with other languages like Python and JavaScript, including similar upsides and struggles. Most prompts and explanations went smoothly as requested, although the agent did need some convincing when it started mixing new code and remnants of its old code, even when the old remnants were unnecessary (as is often the case when using Copilot with other languages, as well).
+Because Chapel has a smaller training corpus than languages like Python and JavaScript, I initially expected AI programming tools to struggle with it. However, I found using GitHub Copilot with Chapel to be a similar experience to using it with those more common languages, including similar upsides and struggles. Most of my prompts produced working code and clear explanations on the first try, the main exception being that the agent occasionally needed convincing when it started mixing newly written code with leftover remnants of earlier attempts, even when those remnants were no longer necessary—something also common with other languages.
 
 ![GitHub Copilot example prompt 0](images/copilot-0.png)
 
@@ -290,7 +294,7 @@ Asking Copilot the difference between `accumulate` and `accumulateOntoState`, as
 
 ![GitHub Copilot example prompt 1](images/copilot-1.png)
 
-Copilot leaving redundant legacy code.
+Copilot leaving redundant legacy code, which required me to convince it of such.
 
 ### Calling the Grouped `min_mean_max()` Function from Arkouda
 
@@ -373,17 +377,15 @@ Now timing each method's performance, here are the results:
 
 ![1 billion row challenge graph](images/1brc-stats.png)
 
-A few notes:
+A few insights stand out from these results. On a smaller number of nodes (or locales), Dask initially beats out Arkouda. As we increase the number of available nodes, however, Arkouda pulls ahead while Dask's performance actually degrades. A possible explanation for Dask's slowdown is under-parallelization: the additional compute doesn't parallelize the work any further and instead introduces more coordination overhead.
 
-* Initially, Dask appears to beat out Arkouda on a smaller number of nodes/locales. However, as we increase the number of available nodes, Arkouda seems to fly past Dask in terms of performance.
-* Why does Dask slow down with more nodes? One possible hypothesis is under-parallelization, where the extra compute being added isn't necessarily parallelizing computations any further and actually adds more coordination overhead.
-* It's also interesting to note that the three-pass approach seems to be superior to the one-pass approach with one node, but the one-pass approach becomes marginally faster than the 3-pass one once we start using two or more nodes. This might imply that my custom 1-pass Arkouda message is doing more than it needs to be.
+The two Arkouda approaches are also worth comparing. The three-pass approach edges out the one-pass approach on a single node, but the one-pass approach becomes marginally faster once we use two or more nodes. This could suggest that my custom one-pass Arkouda message may be doing more work than it strictly needs to.
 
 ## Computing on 1 Trillion Rows
 
 ### Data Generation
 
-Generating 1 trillion lines is quite a bit heftier than generating 1 billion, so I made some tweaks to make generation more manageable and modular. I first modified `generate_data.py` to take in several arguments: namely, the partition ID, number of chunks to generate, chunk size, and path to my lookup table of stations and their mean measurements.
+Generating 1 trillion lines is quite a bit heftier than generating 1 billion, so I made some tweaks to make generation more manageable and modular. The Dask-based generation I used for 1 billion rows ran into scaling issues at this size, so I switched to generating the data with Slurm array jobs instead. I first modified `generate_data.py` to take in several arguments: namely, the partition ID, number of chunks to generate, chunk size, and path to my lookup table of stations and their mean measurements.
 
 ```py
 def parse_args():
@@ -476,9 +478,9 @@ Now calling `sbatch generate_data.sbatch` and waiting for the tasks to complete,
 
 Cool! Now we can put Arkouda and Dask up against our full data.
 
-But wait, with each 1 million row file being about 2.4 megabytes and there being 1 million files, that totals around 2.4 terabytes of data. When we call `ak.argsort(stations)`, a temporary copy of the data is stored in RAM. With ~256 gigabytes of memory per node, let's start measuring at around 16 nodes and beyond to ensure we have enough memory for computation.
+With each 1 million row file being about 2.4 megabytes and there being 1 million files, that totals around 2.4 terabytes of data. The `ak.argsort` in Arkouda uses temporary arrays to do its computation, so we'll need more memory than that. Since our compute nodes only have about 256 gigabytes of memory per node available to Arkouda, we'll need to start measuring at around 16 nodes and beyond to ensure we have enough memory for computation.
 
-And with Dask, we need to make a small tweak when aggregating our min, mean, and max to ensure that Dask uses a tree reduction (where partitions are reduced locally, then partial results are merged level by level into a final result) instead of a peer-to-peer shuffle (where every worker hashes its partial aggregates by station and sends them all‑to‑all across the cluster into many buckets, forcing a synchronization barrier and heavy buffering/spilling) that will result in us running out of memory:
+However, when computing with Dask, I still found workers dying while grouping the data by station with more nodes (likely due to running out of memory), so I needed to make a small tweak when aggregating our min, mean, and max to ensure that Dask used a tree reduction (where partitions are reduced locally, then partial results are merged level by level into a final result) instead of a peer-to-peer shuffle (where every worker hashes its partial aggregates by station and sends them all‑to‑all across the cluster into many buckets, creating a synchronization barrier and heavy buffering/spilling):
 
 ```py
 result = (
@@ -490,10 +492,17 @@ result = (
 
 Now let's see how the two perform:
 
-![1 trillion row challenge graph](images/1trc-stats.png)
+![1 trillion row challenge graph 0](images/1trc-stats-0.png)
+![1 trillion row challenge graph 1](images/1trc-stats-1.png)
 
 We can see that Arkouda blows Dask out of the water here. Both the Arkouda 1-pass and 3-pass approach have relatively comparable times that only decrease as the number of nodes go up, while Dask continues to get slower.
+
+One discrepancy is worth addressing: Coiled reports completing the 1 trillion row challenge with Dask in about 8 minutes, while my Dask runs took closer to 28 minutes. I'm honestly not sure what accounts for the gap—possibly differences in cluster hardware or configuration—but it's worth noting.
 
 ## Conclusions
 
 When doing parallelized computations on smaller amounts of data, Dask appears to beat Arkouda in speed when the number of compute nodes is kept relatively low. However, as more nodes are made available, Arkouda seems to be better at harnessing parallelization to speed up computations, especially as the amount of data increases and more memory is (and thus more nodes are) almost certainly required to handle such information.
+
+The two tools also felt quite different to work with. Dask was a more familiar starting point, requiring minimal upfront setup: Just install and import! Getting a working solution also took less effort, although memory issues were tougher to debug: Vague errors of workers dying required the help of AI to search through worker logs for the root cause. Arkouda required more upfront investment: learning Chapel and building the server through an unfamiliar setup process. Once that was set, however, scaling from 1 billion to 1 trillion rows was a matter of simply adding nodes. Writing a custom single-pass reduction in Chapel was also a unique experience that let me understand how Arkouda parallelizes grouped operations under the hood—something that was abstracted away while using Dask.
+
+So, Arkouda or Dask? If you're limited to just a few nodes, the simple setup of Dask makes it a convincing choice. But once you start scaling up in data and compute nodes, those extra minutes of setup are well worth it in exchange for Arkouda's ability to efficiently take advantage of the added parallelism.
